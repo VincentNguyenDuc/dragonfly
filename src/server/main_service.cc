@@ -578,9 +578,7 @@ Transaction::MultiMode DeduceExecMode(ExecScriptUse state,
     for (const auto& scmd : exec_info.body) {
       // We can only tell if eval is transactional based on they keycount
       if (absl::StartsWith(scmd.Cid()->name(), "EVAL")) {
-        CmdArgVec arg_vec{};
-        auto args = scmd.Slice(&arg_vec);
-        auto keys = DetermineKeys(scmd.Cid(), args);
+        auto keys = DetermineKeys(scmd.Cid(), scmd.Args());
         transactional |= (keys && keys.value().NumArgs() > 0);
       } else {
         transactional |= scmd.Cid()->IsTransactional();
@@ -1779,7 +1777,13 @@ uint32_t Service::DispatchSquashedBatch(facade::ParsedCommand* first, unsigned c
         cid->IsQuit() || cid->IsSubscribeFamily())
       break;
 
-    cmd_refs.push_back(CmdRef{cid, tail_args, ReplyMode::FULL, cmd_cntx});
+    cmd_cntx->SetTailArgs(tail_args);
+    CmdRef ref;
+    ref.cid = cid;
+    ref.reply_mode = ReplyMode::FULL;
+    ref.cmd_cntx = cmd_cntx;
+    ref.from_pipeline = true;
+    cmd_refs.push_back(ref);
     cmd = cmd->next;
   }
 
@@ -2390,8 +2394,9 @@ template <typename F> void IterateAllKeys(const ConnectionState::ExecInfo* exec_
     if (!scmd.Cid()->IsTransactional())
       continue;
 
-    auto args = scmd.Slice(&arg_vec);
-    auto key_res = DetermineKeys(scmd.Cid(), args);
+    auto tail_args = scmd.Args();
+    tail_args.ToVec(&arg_vec);
+    auto key_res = DetermineKeys(scmd.Cid(), tail_args);
     if (!key_res.ok())
       continue;
 
@@ -2494,11 +2499,12 @@ void Service::Exec(CmdArgList args, CommandContext* cmd_cntx) {
       DCHECK_EQ(cmd_cntx->cid(), exec_cid_);
 
       for (const auto& scmd : exec_info.body) {
-        CmdArgList args = scmd.Slice(&arg_vec);
+        auto tail_args = scmd.Args();
+        auto args = tail_args.ToSlice(&arg_vec);
 
         if (scmd.Cid()->IsTransactional()) {
           cmd_cntx->tx()->MultiSwitchCmd(scmd.Cid());
-          OpStatus st = cmd_cntx->tx()->InitByArgs(cntx->ns, cntx->conn_state.db_index, args);
+          OpStatus st = cmd_cntx->tx()->InitByArgs(cntx->ns, cntx->conn_state.db_index, tail_args);
           if (st != OpStatus::OK) {
             cmd_cntx->SendError(st);
             break;
@@ -2508,7 +2514,7 @@ void Service::Exec(CmdArgList args, CommandContext* cmd_cntx) {
         // TODO: we will have to create a CommandContext per command if we want to support async
         // execution inside exec.
         cmd_cntx->UpdateCid(scmd.Cid());
-        cmd_cntx->SetTailArgs(scmd.Args());
+        cmd_cntx->SetTailArgs(tail_args);
         auto invoke_res = InvokeCmd(args, cmd_cntx);
         if ((invoke_res != DispatchResult::OK) ||
             rb->GetError())  // checks for i/o error, not logical error.

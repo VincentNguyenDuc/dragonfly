@@ -62,7 +62,6 @@ vector<string> FormatEvalSlowlog(const ConnectionState& state) {
 StoredCmd::StoredCmd(const CommandId* cid, facade::ArgSlice args, facade::ReplyMode mode)
     : cid_{cid}, reply_mode_{mode} {
   backed_ = std::make_unique<cmn::BackedArguments>(args.begin(), args.end(), args.size());
-  args_ = facade::ParsedArgs{*backed_};
 }
 
 StoredCmd::StoredCmd(const CommandId* cid, cmn::BackedArguments* src, uint8_t tail_index,
@@ -70,22 +69,29 @@ StoredCmd::StoredCmd(const CommandId* cid, cmn::BackedArguments* src, uint8_t ta
     : cid_{cid}, reply_mode_{mode} {
   backed_ = std::make_unique<cmn::BackedArguments>();
   backed_->SwapArgs(*src);
-  args_ = facade::ParsedArgs{*backed_, tail_index};
-}
-
-CmdArgList StoredCmd::Slice(CmdArgVec* scratch) const {
-  return args_.ToSlice(scratch);
+  tail_offset_ = tail_index;
 }
 
 std::string StoredCmd::FirstArg() const {
-  if (NumArgs() == 0) {
-    return {};
-  }
-  return string{args_.Front()};
+  auto args = ParsedArgs{*backed_, tail_offset_};
+  return args.empty() ? string{} : string{args.Front()};
 }
 
 CmdRef StoredCmd::Ref() const {
-  return CmdRef{cid_, args_, reply_mode_};
+  CmdRef ref;
+  ref.cid = cid_;
+  ref.reply_mode = reply_mode_;
+  ref.backed = backed_.get();
+  ref.tail_offset = tail_offset_;
+  ref.from_pipeline = false;
+  return ref;
+}
+
+facade::ParsedArgs CmdRef::Args() const {
+  if (from_pipeline)
+    return cmd_cntx->tail_args();
+  DCHECK(backed);
+  return facade::ParsedArgs{*backed, tail_offset};
 }
 
 ConnectionContext::ConnectionContext(facade::Connection* owner, acl::UserCredentials cred)

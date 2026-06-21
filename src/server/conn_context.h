@@ -25,17 +25,19 @@ struct FlowInfo;
 // CommandContext.
 struct CmdRef {
   const CommandId* cid = nullptr;
-  facade::ParsedArgs args;
   facade::ReplyMode reply_mode = facade::ReplyMode::FULL;
-  CommandContext* cmd_cntx = nullptr;
+  union {
+    CommandContext* cmd_cntx;            // active when from_pipeline == true
+    const cmn::BackedArguments* backed;  // active when from_pipeline == false
+  };
+  uint8_t tail_offset = 0;  // leading args to skip; only used when from_pipeline == false
+  bool from_pipeline = false;
 
   bool IsValid() const {
     return cid != nullptr;
   }
 
-  facade::ArgSlice Slice(CmdArgVec* scratch) const {
-    return args.ToSlice(scratch);
-  }
+  facade::ParsedArgs Args() const;
 };
 
 // Stores command id and arguments for delayed invocation.
@@ -51,17 +53,17 @@ class StoredCmd {
             facade::ReplyMode mode = facade::ReplyMode::FULL);
 
   size_t NumArgs() const {
-    return args_.size();
+    return backed_->size() - tail_offset_;
   }
 
   size_t UsedMemory() const {
     return backed_ ? backed_->HeapMemory() + sizeof(*backed_) : 0;
   }
 
-  facade::ArgSlice Slice(CmdArgVec* scratch) const;
-  const facade::ParsedArgs& Args() const {
-    return args_;
+  facade::ParsedArgs Args() const {
+    return facade::ParsedArgs{*backed_, tail_offset_};
   }
+
   std::string FirstArg() const;
 
   const CommandId* Cid() const {
@@ -75,13 +77,13 @@ class StoredCmd {
   CmdRef Ref() const;
 
  private:
-  const CommandId* cid_;     // underlying command
-  facade::ParsedArgs args_;  // arguments
+  const CommandId* cid_;  // underlying command
 
   // TODO: we could optimize the storage further by introducing StoredCmdCollection and
   // keep the backing storage there. Then this class will only use shallow copies.
   std::unique_ptr<cmn::BackedArguments> backed_;
   facade::ReplyMode reply_mode_;  // reply mode
+  uint8_t tail_offset_ = 0;  // number of leading args to skip (e.g., 1 to skip the command name)
 };
 
 struct ConnectionState {

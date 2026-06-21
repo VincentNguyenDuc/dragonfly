@@ -119,7 +119,7 @@ MultiCommandSquasher::SquashResult MultiCommandSquasher::TrySquash(CmdRef cmd) {
     return SquashResult::NOT_SQUASHED;
   }
 
-  auto args = cmd.Slice(&tmp_keylist_);
+  auto args = cmd.Args();
   if (args.empty())
     return SquashResult::NOT_SQUASHED;
 
@@ -161,13 +161,10 @@ MultiCommandSquasher::SquashResult MultiCommandSquasher::TrySquash(CmdRef cmd) {
 bool MultiCommandSquasher::ExecuteStandalone(RedisReplyBuilder* rb, CmdRef cmd) {
   DCHECK(order_.empty());  // check no squashed chain is interrupted
 
-  auto args = cmd.Slice(&tmp_keylist_);
-
   // In pipeline mode the reply is captured and deferred into the parsed command, preserving
   // the reply order with squashed commands whose replies are sent later by the connection.
   optional<CapturingReplyBuilder> crb;
   if (opts_.pipeline_mode) {
-    DCHECK(cmd.cmd_cntx);
     DCHECK(cmd.reply_mode == ReplyMode::FULL);
     crb.emplace(ReplyMode::FULL, rb->GetRespVersion());
     rb = &*crb;
@@ -178,8 +175,10 @@ bool MultiCommandSquasher::ExecuteStandalone(RedisReplyBuilder* rb, CmdRef cmd) 
       cmd.cmd_cntx->Resolve(crb->Take());
   };
 
+  ParsedArgs tail_args = cmd.Args();
+
   if (opts_.verify_commands) {
-    if (auto err = service_->VerifyCommandState(*cmd.cid, args, *cntx_); err) {
+    if (auto err = service_->VerifyCommandState(*cmd.cid, tail_args, *cntx_); err) {
       rb->SendError(std::move(*err));
       resolve();
       return !opts_.error_abort;
@@ -189,7 +188,7 @@ bool MultiCommandSquasher::ExecuteStandalone(RedisReplyBuilder* rb, CmdRef cmd) 
   auto* tx = cntx_->transaction;
   if (cmd.cid->IsTransactional()) {
     tx->MultiSwitchCmd(cmd.cid);
-    auto status = tx->InitByArgs(cntx_->ns, cntx_->conn_state.db_index, args);
+    auto status = tx->InitByArgs(cntx_->ns, cntx_->conn_state.db_index, tail_args);
     if (status != OpStatus::OK) {
       rb->SendError(status);
       resolve();
@@ -199,7 +198,12 @@ bool MultiCommandSquasher::ExecuteStandalone(RedisReplyBuilder* rb, CmdRef cmd) 
 
   CommandContext cmd_cntx{rb, cntx_};
   cmd_cntx.SetupTx(cmd.cid, tx);
-  cmd_cntx.SetTailArgs(cmd.args);
+  cmd_cntx.SetTailArgs(tail_args);
+
+  // TODO: will go away once InvokeCmd accepts ParsedArgs directly.
+  facade::CmdArgVec tmp_arg_vec;
+  auto args = tail_args.ToSlice(&tmp_arg_vec);
+
   service_->InvokeCmd(args, &cmd_cntx);
   resolve();
 
@@ -211,12 +215,13 @@ OpStatus MultiCommandSquasher::SquashedHopCb(EngineShard* es, RespVersion resp_v
   DCHECK(!sinfo.dispatched.empty());
 
   CapturingReplyBuilder crb(ReplyMode::FULL, resp_v);
-  CmdArgVec arg_vec;
   CommandContext local_cntx{&crb, cntx_};
+  CmdArgVec arg_vec;
+
   local_cntx.SetupTx(nullptr, sinfo.local_tx.get());
 
   auto move_reply = [&sinfo, &crb](ShardExecInfo::Command* cmd) {
-    if (cmd->cmd_cntx)
+    if (cmd->from_pipeline)
       return cmd->cmd_cntx->Resolve(crb.Take());
 
     cmd->reply = crb.Take();
@@ -227,10 +232,11 @@ OpStatus MultiCommandSquasher::SquashedHopCb(EngineShard* es, RespVersion resp_v
 
   for (auto& dispatched : sinfo.dispatched) {
     auto* ctx = &local_cntx;
-    auto args = dispatched.Slice(&arg_vec);
+    auto tail_args = dispatched.Args();
+    // auto args = tail_args.ToSlice(&arg_vec);
     if (opts_.verify_commands) {
       // The shared context is used for state verification, the local one is only for replies
-      if (auto err = service_->VerifyCommandState(*dispatched.cid, args, *cntx_); err) {
+      if (auto err = service_->VerifyCommandState(*dispatched.cid, tail_args, *cntx_); err) {
         crb.SendError(std::move(*err));
         move_reply(&dispatched);
         continue;
@@ -251,12 +257,15 @@ OpStatus MultiCommandSquasher::SquashedHopCb(EngineShard* es, RespVersion resp_v
     ctx->SetupTx(dispatched.cid, local_cntx.tx());
     ctx->tx()->MultiSwitchCmd(dispatched.cid);
 
-    auto status = ctx->tx()->InitByArgs(cntx_->ns, cntx_->conn_state.db_index, args);
+    auto status = ctx->tx()->InitByArgs(cntx_->ns, cntx_->conn_state.db_index, tail_args);
     if (status != OpStatus::OK) {
       ctx->SendError(status);  // Calls Resolve() in async, routes to crb in non async
     } else {
       ctx->UpdateCid(dispatched.cid);
-      ctx->SetTailArgs(dispatched.args);
+      ctx->SetTailArgs(tail_args);
+
+      // TODO: will go away once InvokeCmd accepts ParsedArgs directly.
+      auto args = tail_args.ToSlice(&arg_vec);
       service_->InvokeCmd(args, ctx);
     }
 
