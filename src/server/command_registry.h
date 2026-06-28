@@ -107,14 +107,14 @@ class CommandId : public facade::CommandId {
   }
 
   using Handler = fu2::function_base<true, true, fu2::capacity_default, false, false,
-                                     void(CmdArgList, CommandContext*) const>;
+                                     void(facade::CmdArgParser, CommandContext*) const>;
   using ArgValidator =
       fu2::function_base<true, true, fu2::capacity_default, false, false,
                          std::optional<facade::ErrorReply>(const facade::ParsedArgs&) const>;
 
   // Returns the invoke time in usec.
   void Invoke(CmdArgList args, CommandContext* cmd_cntx) const {
-    handler_(args, cmd_cntx);
+    handler_(facade::CmdArgParser{args}, cmd_cntx);
   }
 
   // Returns error if validation failed, otherwise nullopt
@@ -146,22 +146,14 @@ class CommandId : public facade::CommandId {
     return interleave_step_;
   }
 
-  template <typename RT> CommandId&& SetHandler(RT f(facade::CmdArgParser, CommandContext*)) && {
-    handler_ = [f](CmdArgList args, CommandContext* cntx) { f(MakeParserFromContext(cntx), cntx); };
-    return std::move(*this);
-  }
-
-  template <typename RT>
-  CommandId&& SetAsyncHandler(RT f(facade::CmdArgParser, CommandContext*)) && {
-    kind_mask_ |= SUPPORT_ASYNC;
-    return std::move(*this).SetHandler(f);
-  }
-
-  CommandId&& SetHandler(Handler f, bool async_support = false) && {
-    if (async_support)
-      kind_mask_ |= SUPPORT_ASYNC;
+  CommandId&& SetHandler(Handler f) && {
     handler_ = std::move(f);
     return std::move(*this);
+  }
+
+  CommandId&& SetAsyncHandler(Handler f) && {
+    kind_mask_ |= SUPPORT_ASYNC;
+    return std::move(*this).SetHandler(std::move(f));
   }
 
   CommandId&& SetValidator(ArgValidator f) && {
