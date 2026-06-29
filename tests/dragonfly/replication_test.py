@@ -76,6 +76,14 @@ async def compare_datasets(c_master, c_replica):
             hash = dragonfly.ihash(0, false, 'JSON.GET', key)
         elseif type == 'STREAM' then
             hash = dragonfly.ihash(0, false, 'XRANGE', key, '-', '+')
+        elseif type == 'SBF' then
+            hash = dragonfly.ihash(0, false, 'BF.INFO', key)
+        elseif type == 'CMS' then
+            hash = dragonfly.ihash(0, false, 'CMS.INFO', key)
+        elseif type == 'TOPK' then
+            hash = dragonfly.ihash(0, false, 'TOPK.LIST', key)
+        elseif type == 'CF' then
+            hash = dragonfly.ihash(0, false, 'CF.INFO', key)
         end
         table.insert(res, hash)
     end
@@ -87,7 +95,13 @@ async def compare_datasets(c_master, c_replica):
     for t in SeederV2.DEFAULT_TYPES:
         m_keys, r_keys = set(), set()
 
-        scan_type = "ReJSON-RL" if t == "JSON" else t
+        scan_type = {
+            "JSON": "ReJSON-RL",
+            "SBF": "MBbloom--",
+            "CMS": "CMSk-TYPE",
+            "TOPK": "TopK-TYPE",
+            "CF": "MBbloomCF",
+        }.get(t, t)
         logging.info(f"Scanning keys for type {t}")
         cursor = "0"
         while True:
