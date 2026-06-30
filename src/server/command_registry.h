@@ -151,9 +151,24 @@ class CommandId : public facade::CommandId {
     return std::move(*this);
   }
 
+  // Adapts a free-function handler (including coroutine handlers returning cmd::CmdR) into the
+  // void Handler, discarding the unused return object.
+  template <typename RT> CommandId&& SetHandler(RT f(facade::CmdArgParser, CommandContext*)) && {
+    handler_ = [f](facade::CmdArgParser parser, CommandContext* cntx) {
+      f(std::move(parser), cntx);
+    };
+    return std::move(*this);
+  }
+
   CommandId&& SetAsyncHandler(Handler f) && {
     kind_mask_ |= SUPPORT_ASYNC;
     return std::move(*this).SetHandler(std::move(f));
+  }
+
+  template <typename RT>
+  CommandId&& SetAsyncHandler(RT f(facade::CmdArgParser, CommandContext*)) && {
+    kind_mask_ |= SUPPORT_ASYNC;
+    return std::move(*this).SetHandler(f);
   }
 
   CommandId&& SetValidator(ArgValidator f) && {
